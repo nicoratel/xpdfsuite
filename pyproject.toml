@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xpdfsuite"
+version = "0.1.0"
+description = "Python toolkit for X-ray pair distribution function (xPDF) analysis from powder diffraction data"
+authors = [{name = "Nicolas Ratel-Ramond"}]
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+keywords = ["X-ray diffraction", "XRPD", "PDF", "RDF", "pair distribution function", "crystallography"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
+dependencies = [
+    "numpy>=1.26.0,<2.0.0",
+    "scipy>=1.11.0,<2.0.0",
+    "matplotlib>=3.8.0,<4.0.0",
+    #"diffpy-cmi>=3.1.0,<4.0.0",
+    #"ase>=3.22.0,<4.0.0",
+    "pymatgen>=2024.1.1",
+    #"abtem>=1.0.0,<2.0.0",
+    "fabio>=0.14.0",
+    "pyFAI>=2024.0.0",
+    "scikit-image>=0.22.0,<1.0.0",
+    "ipywidgets>=8.0.0",
+    "ipykernel>=6.0.0",
+    "plotly>=5.0.0",
+    "h5py>=3.0.0",
+    "tqdm>=4.60.0",
+    "streamlit>=1.30.0",
+]
+
+[project.optional-dependencies]
+pdfanalysis = [
+    "pdfanalysis>=0.13.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/nicoratel/xpdfsuite"
+Repository = "https://github.com/nicoratel/xpdfsuite"
+Issues = "https://github.com/nicoratel/xpdfsuite/issues"
+
+[project.scripts]
+xpdfsuite-app = "xpdfsuite._launcher:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
