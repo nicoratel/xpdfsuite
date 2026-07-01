@@ -237,9 +237,9 @@ def compute_ePDF(
     Follows the PDFgetX3 formalism adapted for electron scattering:
 
     1. Optional background subtraction: ``I = Iexp - bgscale * Iref``
-    2. Normalisation by the composition-averaged squared scattering factor <f²>(Q)
-    3. Construction of the reduced structure function:
-       ``F(Q) = Q * (I_norm / I_inf - 1)``
+     2. High-Q scaling ``alpha`` so that ``alpha*I(Q)`` matches ``<f²>(Q)``
+     3. Construction of the reduced structure function from
+         ``S(Q)-1 = (alpha*I(Q) - <f²>(Q)) / <f>(Q)²`` and ``F(Q)=Q*(S(Q)-1)``
     4. Polynomial background removal (PDFgetX3 convention, controlled by ``rpoly``)
     5. Optional Lorch modification function to suppress Fourier ripples
     6. Sine Fourier transform to obtain G(r)
@@ -289,8 +289,10 @@ def compute_ePDF(
 
     Notes
     -----
-    The normalisation factor ``I_inf`` is estimated as the mean intensity in
-    the top 10 % of the Q range (``q > 0.9 * qmax``).
+    The scale factor ``alpha`` is estimated from the top 10 % of the Q range
+    (``q > 0.9 * qmax``) so that ``alpha * I(Q)`` matches ``<f²>(Q)`` in the
+    high-Q region. The reduced function is then built explicitly as
+    ``S(Q)-1 = (alpha*I(Q) - <f²>(Q)) / <f>(Q)²`` and ``F(Q)=Q*(S(Q)-1)``.
     """
     if qmax is None or qmax > q.max():
         qmax = q.max()
@@ -333,13 +335,24 @@ def compute_ePDF(
     )
     f2avg = np.interp(q, q_f2, f2avg)
 
-    mask_inf = q > 0.9 * qmax
-    I_inf = np.mean(Iexp[mask_inf])
+    q_f, favg = compute_avg_scattering_factor(
+        composition,
+        x_max=qmax,
+        x_step=qstep,
+        qvalues=True,
+        xray=False,
+    )
+    favg = np.interp(q, q_f, favg)
 
-    Inorm = Iexp / f2avg
+    mask_inf = q > 0.9 * qmax
+    if np.any(mask_inf):
+        alpha = np.mean(f2avg[mask_inf]) / np.mean(Iexp[mask_inf])
+    else:
+        alpha = np.mean(f2avg) / np.mean(Iexp)
 
     # --- Modified intensity F(Q) ---
-    Fm = q * (Inorm / I_inf - 1)
+    S_minus_1 = (alpha * Iexp - f2avg) / (favg ** 2)
+    Fm = q * S_minus_1
 
     # --- Polynomial background (PDFgetX3 philosophy) ---
     background = fit_polynomial_background(
@@ -435,10 +448,9 @@ def compute_xPDF(
     Follows the PDFgetX3 formalism adapted for X-ray scattering:
 
     1. Optional background subtraction: ``I = Iexp - bgscale * Iref``
-    2. Normalisation by the composition-averaged squared X-ray scattering
-       factor <f²>(Q) (Lobato parametrization)
-    3. Construction of the reduced structure function:
-       ``F(Q) = Q * (I_norm / I_inf - 1)``
+     2. High-Q scaling ``alpha`` so that ``alpha*I(Q)`` matches ``<f²>(Q)``
+     3. Construction of the reduced structure function from
+         ``S(Q)-1 = (alpha*I(Q) - <f²>(Q)) / <f>(Q)²`` and ``F(Q)=Q*(S(Q)-1)``
     4. Polynomial background removal (PDFgetX3 convention, controlled by ``rpoly``)
     5. Optional Lorch modification function to suppress Fourier ripples
     6. Sine Fourier transform to obtain G(r)
@@ -488,8 +500,10 @@ def compute_xPDF(
 
     Notes
     -----
-    The normalisation factor ``I_inf`` is estimated as the mean intensity in
-    the top 10 % of the Q range (``q > 0.9 * qmax``).
+    The scale factor ``alpha`` is estimated from the top 10 % of the Q range
+    (``q > 0.9 * qmax``) so that ``alpha * I(Q)`` matches ``<f²>(Q)`` in the
+    high-Q region. The reduced function is then built explicitly as
+    ``S(Q)-1 = (alpha*I(Q) - <f²>(Q)) / <f>(Q)²`` and ``F(Q)=Q*(S(Q)-1)``.
     """
     if qmax is None or qmax > q.max():
         qmax = q.max()
@@ -528,13 +542,24 @@ def compute_xPDF(
     )
     f2avg = np.interp(q, q_f2, f2avg)
 
-    mask_inf = q > 0.9 * qmax
-    I_inf = np.mean(Iexp[mask_inf])
+    q_f, favg = compute_avg_scattering_factor(
+        composition,
+        x_max=qmax,
+        x_step=qstep,
+        qvalues=True,
+        xray=True,
+    )
+    favg = np.interp(q, q_f, favg)
 
-    Inorm = Iexp / f2avg
+    mask_inf = q > 0.9 * qmax
+    if np.any(mask_inf):
+        alpha = np.mean(f2avg[mask_inf]) / np.mean(Iexp[mask_inf])
+    else:
+        alpha = np.mean(f2avg) / np.mean(Iexp)
 
     # --- Modified intensity F(Q) ---
-    Fm = q * (Inorm / I_inf - 1)
+    S_minus_1 = (alpha * Iexp - f2avg) / (favg ** 2)
+    Fm = q * S_minus_1
 
     # --- Polynomial background (PDFgetX3 philosophy) ---
     background = fit_polynomial_background(
