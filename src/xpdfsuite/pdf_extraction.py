@@ -212,6 +212,82 @@ def fit_polynomial_background(q, Fm, rpoly=0.9, qmin=0.3, qmax=None):
 
 
 # --------------------------------------------------
+# High-Q normalization utilities
+# --------------------------------------------------
+
+def _estimate_high_q_affine_scale(q, Iexp, f2avg, favg, qmax, tail_fraction=0.1):
+    """
+    Estimate affine high-Q intensity scaling for robust PDF normalization.
+
+    Returns ``alpha`` and ``beta`` for:
+    ``S(Q)-1 = (alpha*I(Q) + beta - <f²>(Q)) / <f>(Q)²``.
+    """
+    eps = np.finfo(float).eps
+    qtail = (1.0 - tail_fraction) * qmax
+    mask_tail = (q >= qtail) & np.isfinite(Iexp) & np.isfinite(f2avg) & np.isfinite(favg)
+
+    if np.count_nonzero(mask_tail) < 5:
+        mask_tail = np.isfinite(Iexp) & np.isfinite(f2avg) & np.isfinite(favg)
+
+    I_tail = Iexp[mask_tail]
+    f2_tail = f2avg[mask_tail]
+
+    # Cov/var slope on the high-Q tail is more robust than a simple mean ratio.
+    I_centered = I_tail - np.mean(I_tail)
+    f2_centered = f2_tail - np.mean(f2_tail)
+    var_I = np.dot(I_centered, I_centered)
+    if var_I > eps:
+        alpha = np.dot(I_centered, f2_centered) / var_I
+    else:
+        denom = np.mean(I_tail)
+        alpha = np.mean(f2_tail) / (denom if abs(denom) > eps else np.sign(denom) * eps + eps)
+
+    # Guard alpha with robust high-Q ratio bounds.
+    ratio_valid = np.abs(I_tail) > eps
+    ratios = f2_tail[ratio_valid] / I_tail[ratio_valid]
+    ratios = ratios[np.isfinite(ratios)]
+    if ratios.size > 0:
+        r_med = np.median(ratios)
+        r_mad = np.median(np.abs(ratios - r_med))
+        if r_mad > eps:
+            sigma = 1.4826 * r_mad
+            alpha_lo = r_med - 5.0 * sigma
+            alpha_hi = r_med + 5.0 * sigma
+        else:
+            spread = max(0.2 * abs(r_med), 1e-6)
+            alpha_lo = r_med - spread
+            alpha_hi = r_med + spread
+
+        if alpha_lo > alpha_hi:
+            alpha_lo, alpha_hi = alpha_hi, alpha_lo
+        alpha = np.clip(alpha, alpha_lo, alpha_hi)
+
+    # Enforce mean high-Q S(Q)-1 ~ 0 with f^2 weighting: beta = mean(f2 - alpha*I).
+    beta = np.mean(f2_tail - alpha * I_tail)
+
+    # Keep beta small relative to scattering scale to avoid over-correction.
+    beta_cap_ref = np.mean(np.abs(f2_tail))
+    if not np.isfinite(beta_cap_ref) or beta_cap_ref <= eps:
+        beta_cap_ref = np.mean(np.abs(f2avg[np.isfinite(f2avg)]))
+    beta_cap = 0.01 * beta_cap_ref if np.isfinite(beta_cap_ref) else 0.0
+    if beta_cap > 0.0:
+        beta = np.clip(beta, -beta_cap, beta_cap)
+    else:
+        beta = 0.0
+
+    return alpha, beta
+
+
+def _lorch_with_partial_rms_renorm(qv, qmax, exponent=0.7):
+    """Return Lorch modification with partial RMS renormalization."""
+    lorch = np.sinc(qv / qmax)
+    rms = np.sqrt(np.mean(lorch**2))
+    if np.isfinite(rms) and rms > 0:
+        lorch = lorch / (rms ** exponent)
+    return lorch
+
+
+# --------------------------------------------------
 # PDFgetX3-like PDF (ELECTRONS)
 # --------------------------------------------------
 
@@ -237,11 +313,12 @@ def compute_ePDF(
     Follows the PDFgetX3 formalism adapted for electron scattering:
 
     1. Optional background subtraction: ``I = Iexp - bgscale * Iref``
-     2. High-Q scaling ``alpha`` so that ``alpha*I(Q)`` matches ``<f²>(Q)``
+     2. Robust high-Q affine scaling ``alpha, beta``
      3. Construction of the reduced structure function from
-         ``S(Q)-1 = (alpha*I(Q) - <f²>(Q)) / <f>(Q)²`` and ``F(Q)=Q*(S(Q)-1)``
+         ``S(Q)-1 = (alpha*I(Q) + beta - <f²>(Q)) / <f>(Q)²`` and ``F(Q)=Q*(S(Q)-1)``
     4. Polynomial background removal (PDFgetX3 convention, controlled by ``rpoly``)
-    5. Optional Lorch modification function to suppress Fourier ripples
+     5. Optional Lorch modification function with partial RMS renormalization
+         to suppress Fourier ripples while limiting amplitude bias
     6. Sine Fourier transform to obtain G(r)
 
     Parameters
@@ -289,10 +366,9 @@ def compute_ePDF(
 
     Notes
     -----
-    The scale factor ``alpha`` is estimated from the top 10 % of the Q range
-    (``q > 0.9 * qmax``) so that ``alpha * I(Q)`` matches ``<f²>(Q)`` in the
-    high-Q region. The reduced function is then built explicitly as
-    ``S(Q)-1 = (alpha*I(Q) - <f²>(Q)) / <f>(Q)²`` and ``F(Q)=Q*(S(Q)-1)``.
+    The high-Q scaling is estimated on the top 10 % of the Q range
+    (``q > 0.9 * qmax``) using an affine form with robust safeguards:
+    ``S(Q)-1 = (alpha*I(Q) + beta - <f²>(Q)) / <f>(Q)²``.
     """
     if qmax is None or qmax > q.max():
         qmax = q.max()
@@ -344,14 +420,18 @@ def compute_ePDF(
     )
     favg = np.interp(q, q_f, favg)
 
-    mask_inf = q > 0.9 * qmax
-    if np.any(mask_inf):
-        alpha = np.mean(f2avg[mask_inf]) / np.mean(Iexp[mask_inf])
-    else:
-        alpha = np.mean(f2avg) / np.mean(Iexp)
+    alpha, beta = _estimate_high_q_affine_scale(
+        q=q,
+        Iexp=Iexp,
+        f2avg=f2avg,
+        favg=favg,
+        qmax=qmax,
+        tail_fraction=0.1,
+    )
 
     # --- Modified intensity F(Q) ---
-    S_minus_1 = (alpha * Iexp - f2avg) / (favg ** 2)
+    favg2 = np.maximum(favg**2, np.finfo(float).eps)
+    S_minus_1 = (alpha * Iexp + beta - f2avg) / favg2
     Fm = q * S_minus_1
 
     # --- Polynomial background (PDFgetX3 philosophy) ---
@@ -367,7 +447,7 @@ def compute_ePDF(
     qv = q[mask]
 
     if Lorch:
-        Fv = Fc[mask] * np.sinc(qv / qmax)
+        Fv = Fc[mask] * _lorch_with_partial_rms_renorm(qv, qmax, exponent=0.7)
     else:
         Fv = Fc[mask]
 
@@ -448,11 +528,12 @@ def compute_xPDF(
     Follows the PDFgetX3 formalism adapted for X-ray scattering:
 
     1. Optional background subtraction: ``I = Iexp - bgscale * Iref``
-     2. High-Q scaling ``alpha`` so that ``alpha*I(Q)`` matches ``<f²>(Q)``
+     2. Robust high-Q affine scaling ``alpha, beta``
      3. Construction of the reduced structure function from
-         ``S(Q)-1 = (alpha*I(Q) - <f²>(Q)) / <f>(Q)²`` and ``F(Q)=Q*(S(Q)-1)``
+         ``S(Q)-1 = (alpha*I(Q) + beta - <f²>(Q)) / <f>(Q)²`` and ``F(Q)=Q*(S(Q)-1)``
     4. Polynomial background removal (PDFgetX3 convention, controlled by ``rpoly``)
-    5. Optional Lorch modification function to suppress Fourier ripples
+     5. Optional Lorch modification function with partial RMS renormalization
+         to suppress Fourier ripples while limiting amplitude bias
     6. Sine Fourier transform to obtain G(r)
 
     Parameters
@@ -500,10 +581,9 @@ def compute_xPDF(
 
     Notes
     -----
-    The scale factor ``alpha`` is estimated from the top 10 % of the Q range
-    (``q > 0.9 * qmax``) so that ``alpha * I(Q)`` matches ``<f²>(Q)`` in the
-    high-Q region. The reduced function is then built explicitly as
-    ``S(Q)-1 = (alpha*I(Q) - <f²>(Q)) / <f>(Q)²`` and ``F(Q)=Q*(S(Q)-1)``.
+    The high-Q scaling is estimated on the top 10 % of the Q range
+    (``q > 0.9 * qmax``) using an affine form with robust safeguards:
+    ``S(Q)-1 = (alpha*I(Q) + beta - <f²>(Q)) / <f>(Q)²``.
     """
     if qmax is None or qmax > q.max():
         qmax = q.max()
@@ -551,14 +631,18 @@ def compute_xPDF(
     )
     favg = np.interp(q, q_f, favg)
 
-    mask_inf = q > 0.9 * qmax
-    if np.any(mask_inf):
-        alpha = np.mean(f2avg[mask_inf]) / np.mean(Iexp[mask_inf])
-    else:
-        alpha = np.mean(f2avg) / np.mean(Iexp)
+    alpha, beta = _estimate_high_q_affine_scale(
+        q=q,
+        Iexp=Iexp,
+        f2avg=f2avg,
+        favg=favg,
+        qmax=qmax,
+        tail_fraction=0.1,
+    )
 
     # --- Modified intensity F(Q) ---
-    S_minus_1 = (alpha * Iexp - f2avg) / (favg ** 2)
+    favg2 = np.maximum(favg**2, np.finfo(float).eps)
+    S_minus_1 = (alpha * Iexp + beta - f2avg) / favg2
     Fm = q * S_minus_1
 
     # --- Polynomial background (PDFgetX3 philosophy) ---
@@ -574,7 +658,7 @@ def compute_xPDF(
     qv = q[mask]
 
     if Lorch:
-        Fv = Fc[mask] * np.sinc(qv / qmax)
+        Fv = Fc[mask] * _lorch_with_partial_rms_renorm(qv, qmax, exponent=0.7)
     else:
         Fv = Fc[mask]
 
